@@ -23,7 +23,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from utils.loom_probe import probe_loom, run_recognize_region
+from utils.loom_probe import (
+    probe_loom,
+    run_explain_board,
+    run_lift_to_frd,
+    run_plan_io,
+    run_recognize_region,
+    run_synthesize_fabric,
+)
 
 logger = logging.getLogger("kicad_interface")
 
@@ -179,6 +186,152 @@ class LoomCommands:
             }
 
         result = run_recognize_region(pcb_path, refs=refs, outline=outline, probe=probe)
+        result.setdefault("engine_available", True)
+        result["engine_mode"] = probe.get("mode")
+        return result
+
+    # -- loom_lift_to_frd -------------------------------------------------------
+
+    def loom_lift_to_frd(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Lift the open board back into an observed FRD (Loom's `lift_to_frd`).
+
+        Optional `boardPath` overrides the currently open board. Gated on the
+        probe: returns a friendly degrade message (never a stack trace) when
+        the engine isn't reachable. On success returns `{markdown, requirements,
+        gaps}`.
+        """
+        pcb_path = params.get("boardPath") or self._resolve_board_path()
+        if not pcb_path:
+            return {
+                "success": False,
+                "error": (
+                    "No board is open and no boardPath was given; open a project "
+                    "first or pass boardPath explicitly."
+                ),
+            }
+
+        probe = probe_loom()
+        if not probe.get("available"):
+            return {
+                "success": False,
+                "engine_available": False,
+                "error": probe.get("reason"),
+                "how_to_install": probe.get("how_to_install"),
+            }
+
+        result = run_lift_to_frd(pcb_path, probe=probe)
+        result.setdefault("engine_available", True)
+        result["engine_mode"] = probe.get("mode")
+        return result
+
+    # -- loom_explain_board -------------------------------------------------------
+
+    def loom_explain_board(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Render a human explanation of the open board (Loom's `explain_board`).
+
+        Optional `boardPath` overrides the currently open board. Gated on the
+        probe: returns a friendly degrade message (never a stack trace) when
+        the engine isn't reachable.
+        """
+        pcb_path = params.get("boardPath") or self._resolve_board_path()
+        if not pcb_path:
+            return {
+                "success": False,
+                "error": (
+                    "No board is open and no boardPath was given; open a project "
+                    "first or pass boardPath explicitly."
+                ),
+            }
+
+        probe = probe_loom()
+        if not probe.get("available"):
+            return {
+                "success": False,
+                "engine_available": False,
+                "error": probe.get("reason"),
+                "how_to_install": probe.get("how_to_install"),
+            }
+
+        result = run_explain_board(pcb_path, probe=probe)
+        result.setdefault("engine_available", True)
+        result["engine_mode"] = probe.get("mode")
+        return result
+
+    # -- loom_plan_io -------------------------------------------------------------
+
+    def loom_plan_io(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Plan an IO pin assignment via Loom's `plan_io` CSP solver.
+
+        Args: `device` (a device ref/name loadable from the Loom corpus store,
+        e.g. an STM32 part number) and `interfaces` (list of requested
+        peripheral instance names, e.g. ["SPI1", "USART2"]). Optional
+        `allowedPins` (Class-B observed-pin restriction) and `consumedPins`
+        (incremental-gate exhaustion). Gated on the probe: returns a friendly
+        degrade message (never a stack trace) when the engine isn't reachable.
+        """
+        device = params.get("device")
+        interfaces = params.get("interfaces")
+
+        if not device:
+            return {"success": False, "error": "Provide `device` (a device ref/name)."}
+        if not interfaces:
+            return {
+                "success": False,
+                "error": "Provide `interfaces` (a non-empty list of requested peripheral instance names).",
+            }
+
+        probe = probe_loom()
+        if not probe.get("available"):
+            return {
+                "success": False,
+                "engine_available": False,
+                "error": probe.get("reason"),
+                "how_to_install": probe.get("how_to_install"),
+            }
+
+        result = run_plan_io(
+            device,
+            interfaces,
+            allowed_pins=params.get("allowedPins"),
+            consumed_pins=params.get("consumedPins"),
+            probe=probe,
+        )
+        result.setdefault("engine_available", True)
+        result["engine_mode"] = probe.get("mode")
+        return result
+
+    # -- loom_synthesize_fabric ----------------------------------------------------
+
+    def loom_synthesize_fabric(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run two-gate fabric synthesis via Loom's `synthesize_fabric`.
+
+        Args: `device` (a device ref/name loadable from the Loom corpus store)
+        and `specText` (the compact stuff spec,
+        `<region>:<TYPE|instance>[*count][@rot]`). Gated on the probe: returns
+        a friendly degrade message (never a stack trace) when the engine isn't
+        reachable. On success returns `{seated, contention}`.
+        """
+        device = params.get("device")
+        spec_text = params.get("specText")
+
+        if not device:
+            return {"success": False, "error": "Provide `device` (a device ref/name)."}
+        if not spec_text:
+            return {
+                "success": False,
+                "error": "Provide `specText` (a compact stuff spec, e.g. 'region1:SPI1').",
+            }
+
+        probe = probe_loom()
+        if not probe.get("available"):
+            return {
+                "success": False,
+                "engine_available": False,
+                "error": probe.get("reason"),
+                "how_to_install": probe.get("how_to_install"),
+            }
+
+        result = run_synthesize_fabric(device, spec_text, probe=probe)
         result.setdefault("engine_available", True)
         result["engine_mode"] = probe.get("mode")
         return result

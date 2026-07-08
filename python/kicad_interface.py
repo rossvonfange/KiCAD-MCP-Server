@@ -680,6 +680,10 @@ class KiCADInterface(SchematicHandlersMixin):
             # importable, so the public MCP works standalone without Loom.
             "loom_status": self.loom_commands.loom_status,
             "loom_recognize_region": self.loom_commands.loom_recognize_region,
+            "loom_lift_to_frd": self.loom_commands.loom_lift_to_frd,
+            "loom_explain_board": self.loom_commands.loom_explain_board,
+            "loom_plan_io": self.loom_commands.loom_plan_io,
+            "loom_synthesize_fabric": self.loom_commands.loom_synthesize_fabric,
             "kicad_enable_api": self.loom_commands.kicad_enable_api,
             "loom_install_plugin": self.loom_commands.loom_install_plugin,
         }

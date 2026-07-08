@@ -327,3 +327,504 @@ def run_recognize_region(
 
     interpreter = probe.get("interpreter") or resolve_loom_python()
     return _recognize_region_subprocess(interpreter, pcb_path, refs, outline)
+
+
+# ---------------------------------------------------------------------------
+# shared: loading the default Catalog (lift_to_frd / explain_board need it)
+# ---------------------------------------------------------------------------
+
+
+def _load_default_catalog():
+    """In-process load of the default InferSynth Catalog. Raises on failure —
+    callers wrap this in their own try/except so the error surfaces as a
+    normal degrade dict, not a stack trace."""
+    import infersynth  # type: ignore
+    from pathlib import Path as _Path
+
+    from infersynth.catalog import Catalog  # type: ignore
+
+    catalog_dir = _Path(infersynth.__file__).resolve().parent.parent / "catalog"
+    return Catalog.load(catalog_dir)
+
+
+# ---------------------------------------------------------------------------
+# lift_to_frd seam
+# ---------------------------------------------------------------------------
+
+_LIFT_TO_FRD_SUBPROCESS_SOURCE = (
+    "import dataclasses, json, sys\n"
+    "def _to_jsonable(obj):\n"
+    "    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):\n"
+    "        return {k: _to_jsonable(v) for k, v in dataclasses.asdict(obj).items()}\n"
+    "    if isinstance(obj, (list, tuple, set, frozenset)):\n"
+    "        return [_to_jsonable(v) for v in obj]\n"
+    "    if isinstance(obj, dict):\n"
+    "        return {k: _to_jsonable(v) for k, v in obj.items()}\n"
+    "    return obj\n"
+    "\n"
+    "payload = json.loads(sys.stdin.read())\n"
+    "pcb_path = payload['pcb_path']\n"
+    "\n"
+    "try:\n"
+    "    from loom.capability import FileBridge, lift_to_frd\n"
+    "    import infersynth\n"
+    "    from pathlib import Path\n"
+    "    from infersynth.catalog import Catalog\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'import failed: {type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "try:\n"
+    "    bridge = FileBridge(pcb_path)\n"
+    "    catalog_dir = Path(infersynth.__file__).resolve().parent.parent / 'catalog'\n"
+    "    catalog = Catalog.load(catalog_dir)\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'setup failed: {type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "try:\n"
+    "    frd = lift_to_frd(bridge, catalog=catalog)\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'{type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "print(json.dumps({'success': True, 'result': {\n"
+    "    'markdown': frd.markdown,\n"
+    "    'requirements': _to_jsonable(frd.requirements),\n"
+    "    'gaps': list(frd.gaps),\n"
+    "}}))\n"
+)
+
+
+def _lift_to_frd_in_process(pcb_path: str) -> Dict[str, Any]:
+    try:
+        from loom.capability import FileBridge, lift_to_frd  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"import failed: {type(exc).__name__}: {exc}"}
+
+    try:
+        bridge = FileBridge(pcb_path)
+        catalog = _load_default_catalog()
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"setup failed: {type(exc).__name__}: {exc}"}
+
+    try:
+        frd = lift_to_frd(bridge, catalog=catalog)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "success": True,
+        "result": {
+            "markdown": frd.markdown,
+            "requirements": _to_jsonable(frd.requirements),
+            "gaps": list(frd.gaps),
+        },
+    }
+
+
+def _lift_to_frd_subprocess(interpreter: str, pcb_path: str) -> Dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            [interpreter, "-c", _LIFT_TO_FRD_SUBPROCESS_SOURCE],
+            input=json.dumps({"pcb_path": pcb_path}),
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"subprocess call failed: {type(exc).__name__}: {exc}"}
+
+    if proc.returncode != 0:
+        return {
+            "success": False,
+            "error": f"subprocess exited {proc.returncode}: {(proc.stderr or '').strip()[:2000]}",
+        }
+
+    try:
+        lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+        return json.loads(lines[-1]) if lines else {"success": False, "error": "no output"}
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"unparsable subprocess output: {exc}"}
+
+
+def run_lift_to_frd(pcb_path: str, probe: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Call ``loom.capability.lift_to_frd`` via whichever seam is available.
+
+    Never raises. Returns ``{"success": True, "result": {"markdown", "requirements",
+    "gaps"}}`` or a friendly degrade dict.
+    """
+    probe = probe if probe is not None else probe_loom()
+    if not probe.get("available"):
+        return {
+            "success": False,
+            "error": probe.get("reason", "loom.capability unavailable"),
+            "how_to_install": probe.get("how_to_install"),
+        }
+
+    if probe.get("mode") == "in-process":
+        return _lift_to_frd_in_process(pcb_path)
+
+    interpreter = probe.get("interpreter") or resolve_loom_python()
+    return _lift_to_frd_subprocess(interpreter, pcb_path)
+
+
+# ---------------------------------------------------------------------------
+# explain_board seam
+# ---------------------------------------------------------------------------
+
+_EXPLAIN_BOARD_SUBPROCESS_SOURCE = (
+    "import json, sys\n"
+    "\n"
+    "payload = json.loads(sys.stdin.read())\n"
+    "pcb_path = payload['pcb_path']\n"
+    "\n"
+    "try:\n"
+    "    from loom.capability import FileBridge, explain_board\n"
+    "    import infersynth\n"
+    "    from pathlib import Path\n"
+    "    from infersynth.catalog import Catalog\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'import failed: {type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "try:\n"
+    "    bridge = FileBridge(pcb_path)\n"
+    "    catalog_dir = Path(infersynth.__file__).resolve().parent.parent / 'catalog'\n"
+    "    catalog = Catalog.load(catalog_dir)\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'setup failed: {type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "try:\n"
+    "    text = explain_board(bridge, catalog=catalog)\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'{type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "print(json.dumps({'success': True, 'result': {'explanation': text}}))\n"
+)
+
+
+def _explain_board_in_process(pcb_path: str) -> Dict[str, Any]:
+    try:
+        from loom.capability import FileBridge, explain_board  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"import failed: {type(exc).__name__}: {exc}"}
+
+    try:
+        bridge = FileBridge(pcb_path)
+        catalog = _load_default_catalog()
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"setup failed: {type(exc).__name__}: {exc}"}
+
+    try:
+        text = explain_board(bridge, catalog=catalog)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    return {"success": True, "result": {"explanation": text}}
+
+
+def _explain_board_subprocess(interpreter: str, pcb_path: str) -> Dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            [interpreter, "-c", _EXPLAIN_BOARD_SUBPROCESS_SOURCE],
+            input=json.dumps({"pcb_path": pcb_path}),
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"subprocess call failed: {type(exc).__name__}: {exc}"}
+
+    if proc.returncode != 0:
+        return {
+            "success": False,
+            "error": f"subprocess exited {proc.returncode}: {(proc.stderr or '').strip()[:2000]}",
+        }
+
+    try:
+        lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+        return json.loads(lines[-1]) if lines else {"success": False, "error": "no output"}
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"unparsable subprocess output: {exc}"}
+
+
+def run_explain_board(pcb_path: str, probe: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Call ``loom.capability.explain_board`` via whichever seam is available.
+
+    Never raises. Returns ``{"success": True, "result": {"explanation": str}}``
+    or a friendly degrade dict.
+    """
+    probe = probe if probe is not None else probe_loom()
+    if not probe.get("available"):
+        return {
+            "success": False,
+            "error": probe.get("reason", "loom.capability unavailable"),
+            "how_to_install": probe.get("how_to_install"),
+        }
+
+    if probe.get("mode") == "in-process":
+        return _explain_board_in_process(pcb_path)
+
+    interpreter = probe.get("interpreter") or resolve_loom_python()
+    return _explain_board_subprocess(interpreter, pcb_path)
+
+
+# ---------------------------------------------------------------------------
+# plan_io seam
+# ---------------------------------------------------------------------------
+
+_PLAN_IO_SUBPROCESS_SOURCE = (
+    "import json, sys\n"
+    "\n"
+    "payload = json.loads(sys.stdin.read())\n"
+    "device_ref = payload['device_ref']\n"
+    "requested = payload['requested']\n"
+    "allowed_pins = payload.get('allowed_pins')\n"
+    "consumed_pins = payload.get('consumed_pins') or []\n"
+    "\n"
+    "try:\n"
+    "    from loom.capability import plan_io\n"
+    "    from loom.ioplanner import load_device\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'import failed: {type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "try:\n"
+    "    capability = load_device(device_ref)\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'load_device failed: {type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "kwargs = {'consumed_pins': consumed_pins}\n"
+    "if allowed_pins is not None:\n"
+    "    kwargs['allowed_pins'] = allowed_pins\n"
+    "\n"
+    "try:\n"
+    "    plan = plan_io(capability, requested, **kwargs)\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'{type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "print(json.dumps({'success': True, 'result': plan.as_dict()}))\n"
+)
+
+
+def _plan_io_in_process(
+    device_ref: str,
+    requested: List[str],
+    allowed_pins: Optional[List[str]],
+    consumed_pins: List[str],
+) -> Dict[str, Any]:
+    try:
+        from loom.capability import plan_io  # type: ignore
+        from loom.ioplanner import load_device  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"import failed: {type(exc).__name__}: {exc}"}
+
+    try:
+        capability = load_device(device_ref)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"load_device failed: {type(exc).__name__}: {exc}"}
+
+    kwargs: Dict[str, Any] = {"consumed_pins": consumed_pins}
+    if allowed_pins is not None:
+        kwargs["allowed_pins"] = allowed_pins
+
+    try:
+        plan = plan_io(capability, requested, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    return {"success": True, "result": plan.as_dict()}
+
+
+def _plan_io_subprocess(
+    interpreter: str,
+    device_ref: str,
+    requested: List[str],
+    allowed_pins: Optional[List[str]],
+    consumed_pins: List[str],
+) -> Dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            [interpreter, "-c", _PLAN_IO_SUBPROCESS_SOURCE],
+            input=json.dumps(
+                {
+                    "device_ref": device_ref,
+                    "requested": requested,
+                    "allowed_pins": allowed_pins,
+                    "consumed_pins": consumed_pins,
+                }
+            ),
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"subprocess call failed: {type(exc).__name__}: {exc}"}
+
+    if proc.returncode != 0:
+        return {
+            "success": False,
+            "error": f"subprocess exited {proc.returncode}: {(proc.stderr or '').strip()[:2000]}",
+        }
+
+    try:
+        lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+        return json.loads(lines[-1]) if lines else {"success": False, "error": "no output"}
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"unparsable subprocess output: {exc}"}
+
+
+def run_plan_io(
+    device_ref: str,
+    requested: List[str],
+    allowed_pins: Optional[List[str]] = None,
+    consumed_pins: Optional[List[str]] = None,
+    probe: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Call ``loom.capability.plan_io`` via whichever seam is available.
+
+    ``device_ref`` names a device in the corpus store (``loom.ioplanner.load_device``);
+    ``requested`` is the list of peripheral instance names to place. Never
+    raises. Returns ``{"success": True, "result": <IoPlan.as_dict()>}`` or a
+    friendly degrade dict.
+    """
+    consumed_pins = consumed_pins or []
+    probe = probe if probe is not None else probe_loom()
+    if not probe.get("available"):
+        return {
+            "success": False,
+            "error": probe.get("reason", "loom.capability unavailable"),
+            "how_to_install": probe.get("how_to_install"),
+        }
+
+    if probe.get("mode") == "in-process":
+        return _plan_io_in_process(device_ref, requested, allowed_pins, consumed_pins)
+
+    interpreter = probe.get("interpreter") or resolve_loom_python()
+    return _plan_io_subprocess(interpreter, device_ref, requested, allowed_pins, consumed_pins)
+
+
+# ---------------------------------------------------------------------------
+# synthesize_fabric seam
+# ---------------------------------------------------------------------------
+
+_SYNTHESIZE_FABRIC_SUBPROCESS_SOURCE = (
+    "import dataclasses, json, sys\n"
+    "def _to_jsonable(obj):\n"
+    "    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):\n"
+    "        return {k: _to_jsonable(v) for k, v in dataclasses.asdict(obj).items()}\n"
+    "    if isinstance(obj, (list, tuple, set, frozenset)):\n"
+    "        return [_to_jsonable(v) for v in obj]\n"
+    "    if isinstance(obj, dict):\n"
+    "        return {k: _to_jsonable(v) for k, v in obj.items()}\n"
+    "    return obj\n"
+    "\n"
+    "payload = json.loads(sys.stdin.read())\n"
+    "device_ref = payload['device_ref']\n"
+    "spec_text = payload['spec_text']\n"
+    "\n"
+    "try:\n"
+    "    from loom.capability import synthesize_fabric\n"
+    "    from loom.ioplanner import load_device\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'import failed: {type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "try:\n"
+    "    capability = load_device(device_ref)\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'load_device failed: {type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "try:\n"
+    "    result = synthesize_fabric(capability, spec_text)\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'success': False, 'error': f'{type(exc).__name__}: {exc}'}))\n"
+    "    sys.exit(0)\n"
+    "\n"
+    "print(json.dumps({'success': True, 'result': {\n"
+    "    'seated': _to_jsonable(result.seated),\n"
+    "    'contention': _to_jsonable(result.contention),\n"
+    "}}))\n"
+)
+
+
+def _synthesize_fabric_in_process(device_ref: str, spec_text: str) -> Dict[str, Any]:
+    try:
+        from loom.capability import synthesize_fabric  # type: ignore
+        from loom.ioplanner import load_device  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"import failed: {type(exc).__name__}: {exc}"}
+
+    try:
+        capability = load_device(device_ref)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"load_device failed: {type(exc).__name__}: {exc}"}
+
+    try:
+        result = synthesize_fabric(capability, spec_text)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "success": True,
+        "result": {
+            "seated": _to_jsonable(result.seated),
+            "contention": _to_jsonable(result.contention),
+        },
+    }
+
+
+def _synthesize_fabric_subprocess(interpreter: str, device_ref: str, spec_text: str) -> Dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            [interpreter, "-c", _SYNTHESIZE_FABRIC_SUBPROCESS_SOURCE],
+            input=json.dumps({"device_ref": device_ref, "spec_text": spec_text}),
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"subprocess call failed: {type(exc).__name__}: {exc}"}
+
+    if proc.returncode != 0:
+        return {
+            "success": False,
+            "error": f"subprocess exited {proc.returncode}: {(proc.stderr or '').strip()[:2000]}",
+        }
+
+    try:
+        lines = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+        return json.loads(lines[-1]) if lines else {"success": False, "error": "no output"}
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"unparsable subprocess output: {exc}"}
+
+
+def run_synthesize_fabric(
+    device_ref: str, spec_text: str, probe: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Call ``loom.capability.synthesize_fabric`` via whichever seam is available.
+
+    ``device_ref`` names a device in the corpus store; ``spec_text`` is the
+    compact stuff spec (``<region>:<TYPE|instance>[*count][@rot]``). Never
+    raises. Returns ``{"success": True, "result": {"seated", "contention"}}``
+    or a friendly degrade dict.
+    """
+    probe = probe if probe is not None else probe_loom()
+    if not probe.get("available"):
+        return {
+            "success": False,
+            "error": probe.get("reason", "loom.capability unavailable"),
+            "how_to_install": probe.get("how_to_install"),
+        }
+
+    if probe.get("mode") == "in-process":
+        return _synthesize_fabric_in_process(device_ref, spec_text)
+
+    interpreter = probe.get("interpreter") or resolve_loom_python()
+    return _synthesize_fabric_subprocess(interpreter, device_ref, spec_text)

@@ -65,6 +65,112 @@ export function registerLoomTools(server: McpServer, callKicadScript: Function) 
     },
   );
 
+  // lift_to_frd — recognize the whole open board back into an observed FRD
+  server.tool(
+    "loom_lift_to_frd",
+    "Lift the currently-open board back into an observed FRD (Markdown requirements doc) via the Loom/InferSynth engine's lift_to_frd verb — the formal inverse of synthesis. Returns `markdown` (the emitted FRD, re-consumable by synthesis/lint), `requirements` (structured per-subsystem requirement list), and `gaps` (what recognition could not recover). Requires the Loom engine to be reachable (see loom_status); if it isn't, returns a friendly degrade message instead of failing.",
+    {
+      boardPath: z
+        .string()
+        .optional()
+        .describe("Path to .kicad_pcb file (default: the currently open board)"),
+    },
+    async (args: { boardPath?: string }) => {
+      const result = await callKicadScript("loom_lift_to_frd", args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  // explain_board — a human-readable rendering of the lifted FRD
+  server.tool(
+    "loom_explain_board",
+    "Render a human-readable explanation of the currently-open board via the Loom/InferSynth engine's explain_board verb (a rendering of the same lifted FRD lift_to_frd produces). Requires the Loom engine to be reachable (see loom_status); if it isn't, returns a friendly degrade message instead of failing.",
+    {
+      boardPath: z
+        .string()
+        .optional()
+        .describe("Path to .kicad_pcb file (default: the currently open board)"),
+    },
+    async (args: { boardPath?: string }) => {
+      const result = await callKicadScript("loom_explain_board", args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  // plan_io — the CSP pin-assignment solver, as a tool
+  server.tool(
+    "loom_plan_io",
+    "Plan an IO pin assignment via the Loom/InferSynth engine's plan_io CSP solver, over a device loaded from the Loom device-capability corpus. Pass `device` (a device ref/name, e.g. an STM32 part number) and `interfaces` (requested peripheral instance names, e.g. ['SPI1', 'USART2']). Optional `allowedPins` restricts to an observed pin set (Class B); `consumedPins` marks pins already used elsewhere. Returns the solver's Assignment | Infeasible envelope: pin placements on success, or conflicts (each carrying its blocking constraints) on failure. Requires the Loom engine to be reachable (see loom_status); if it isn't, returns a friendly degrade message instead of failing.",
+    {
+      device: z.string().describe("Device ref/name to load from the Loom device-capability corpus"),
+      interfaces: z
+        .array(z.string())
+        .min(1)
+        .describe("Requested peripheral instance names, e.g. ['SPI1', 'USART2']"),
+      allowedPins: z
+        .array(z.string())
+        .optional()
+        .describe("Optional Class-B restriction: only place onto these pins"),
+      consumedPins: z
+        .array(z.string())
+        .optional()
+        .describe("Optional pins to treat as already consumed elsewhere"),
+    },
+    async (args: {
+      device: string;
+      interfaces: string[];
+      allowedPins?: string[];
+      consumedPins?: string[];
+    }) => {
+      const result = await callKicadScript("loom_plan_io", args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  // synthesize_fabric — the two-gate fabric synthesis, as a tool
+  server.tool(
+    "loom_synthesize_fabric",
+    "Run two-gate fabric synthesis via the Loom/InferSynth engine's synthesize_fabric verb, from a compact stuff spec over a device loaded from the Loom device-capability corpus. Pass `device` (a device ref/name) and `specText` (the compact spec, `<region>:<TYPE|instance>[*count][@rot]`). A minimal package is auto-scaffolded (one generous region per region-name in the spec). Returns `seated` (interfaces that passed both gates, with pin placements + room) and `contention` (interfaces that failed a gate, with reasons). Requires the Loom engine to be reachable (see loom_status); if it isn't, returns a friendly degrade message instead of failing.",
+    {
+      device: z.string().describe("Device ref/name to load from the Loom device-capability corpus"),
+      specText: z
+        .string()
+        .describe("Compact stuff spec, e.g. 'region1:SPI1' or 'region1:USART*2@90'"),
+    },
+    async (args: { device: string; specText: string }) => {
+      const result = await callKicadScript("loom_synthesize_fabric", args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
   // Enable KiCad's IPC API server
   server.tool(
     "kicad_enable_api",
