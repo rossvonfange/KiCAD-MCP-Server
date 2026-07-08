@@ -344,6 +344,7 @@ try:
     from commands.library_schematic import LibraryManager as SchematicLibraryManager
     from commands.library_symbol import SymbolLibraryCommands, SymbolLibraryManager
     from commands.hierarchical_place import HierarchicalPlaceCommands
+    from commands.loom import LoomCommands
     from commands.project import ProjectCommands
     from commands.routing import RoutingCommands
     from commands.schematic import SchematicLoadError, SchematicManager
@@ -438,6 +439,11 @@ class KiCADInterface(SchematicHandlersMixin):
         # Batch schematic authoring commands (need an interface back-reference for the
         # single-item add/edit/get handlers, footprint library, and sub-sheet fixer)
         self.batch_commands = SchematicBatchCommands(self)
+        # Loom/InferSynth engine nice-to-haves (needs an interface back-reference
+        # to resolve the currently-open board's file path) + KiCad env bootstrap
+        # commands (kicad_enable_api, loom_install_plugin) that don't touch the
+        # board at all.
+        self.loom_commands = LoomCommands(self)
 
         # Initialize JLCPCB API integration
         self.jlcpcb_client = JLCPCBClient()  # Official API (requires auth)
@@ -668,6 +674,14 @@ class KiCADInterface(SchematicHandlersMixin):
             "import_eagle_project": self.eagle_commands.import_eagle_project,
             # Vendor PCB import (kicad-cli pcb import wrapper)
             "import_pcb": self.pcb_import_commands.import_pcb,
+            # Loom/InferSynth engine nice-to-haves (Plan 2 — MCP adapter).
+            # Every one of these is gated on utils.loom_probe; they degrade to
+            # a friendly message (never a stack trace) when the engine isn't
+            # importable, so the public MCP works standalone without Loom.
+            "loom_status": self.loom_commands.loom_status,
+            "loom_recognize_region": self.loom_commands.loom_recognize_region,
+            "kicad_enable_api": self.loom_commands.kicad_enable_api,
+            "loom_install_plugin": self.loom_commands.loom_install_plugin,
         }
 
         logger.info(f"KiCAD interface initialized (backend: {'IPC' if self.use_ipc else 'SWIG'})")

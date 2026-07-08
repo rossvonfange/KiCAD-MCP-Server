@@ -185,6 +185,12 @@ export const toolCategories: ToolCategory[] = [
     description: "Freerouting autorouter: automatic PCB routing via Specctra DSN/SES",
     tools: ["autoroute", "export_dsn", "import_ses", "check_freerouting"],
   },
+  {
+    name: "loom",
+    description:
+      "Loom/InferSynth engine nice-to-haves (engine-gated, degrades gracefully) and KiCad environment bootstrap: engine status, region recognition, API-server enable, plugin install",
+    tools: ["loom_status", "loom_recognize_region", "kicad_enable_api", "loom_install_plugin"],
+  },
 ];
 
 /**
