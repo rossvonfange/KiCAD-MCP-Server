@@ -1,7 +1,63 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "kicad-mcp-server"
 version = "2.1.0"
 requires-python = ">=3.9"
+description = "Pure-Python (Node-free) MCP server fronting the KiCAD backend in-process"
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = [
+    # MCP Python SDK (FastMCP server)
+    "mcp>=1.2.0",
+    # Backend runtime dependencies (file-based + IPC command surface).
+    # NOTE: pcbnew (SWIG) is intentionally NOT listed here — it is provided by a
+    # KiCad install and is not pip-installable. SWIG-only board commands require
+    # running inside/alongside KiCad's Python; file-based + IPC commands work
+    # standalone. See README for the degradation contract.
+    "sexpdata>=1.0.2",
+    "kicad-skip>=0.1.0",
+    "Pillow>=9.0.0",
+    "cairosvg>=2.7.0",
+    "colorlog>=6.7.0",
+    "typing-extensions>=4.0.0",
+    "pydantic>=2.5.0",
+]
+
+[project.optional-dependencies]
+# IPC (real-time UI sync) backend; optional because file-based commands work
+# without a live KiCad.
+ipc = ["kicad-python>=0.5.0"]
+
+[project.scripts]
+kicad-mcp = "kicad_mcp.server:main"
+
+[tool.setuptools]
+# The backend runs with `python/` on sys.path (kicad_interface and its sibling
+# top-level packages import each other absolutely, e.g. `from commands.board ...`).
+# Rooting the distribution at `python/` preserves that layout in the wheel.
+package-dir = { "" = "python" }
+py-modules = ["kicad_interface"]
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = [
+    "kicad_mcp*",
+    "commands*",
+    "schemas*",
+    "utils*",
+    "annotations*",
+    "resources*",
+    "kicad_api*",
+    "parsers*",
+    "templates*",
+]
+
+[tool.setuptools.package-data]
+annotations = ["*.json"]
+templates = ["*.kicad_sch"]
 
 [tool.black]
 line-length = 100
